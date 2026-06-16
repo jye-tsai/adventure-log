@@ -323,7 +323,7 @@ function unb64(str){ const bin=atob(str); const a=new Uint8Array(bin.length); fo
 async function deriveKey(pw, salt){
   const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey({ name:"PBKDF2", salt, iterations:250000, hash:"SHA-256" },
-    base, { name:"AES-GCM", length:256 }, false, ["encrypt","decrypt"]);
+    base, { name:"AES-GCM", length:256 }, true, ["encrypt","decrypt"]);
 }
 async function encStr(plain){
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -354,6 +354,24 @@ async function unlock(pw){
   return true;
 }
 async function save(){ if(!cryptoKey) return; localStorage.setItem(LS.data, await encStr(JSON.stringify(data))); autoSync(); }
+
+/* ---------- 登入狀態（sessionStorage：刷新保持、關閉分頁自動上鎖）---------- */
+const SK = "al_session_key";
+async function cacheSessionKey(){
+  try{ const raw = await crypto.subtle.exportKey("raw", cryptoKey); sessionStorage.setItem(SK, b64(new Uint8Array(raw))); }catch(e){}
+}
+function clearSessionKey(){ sessionStorage.removeItem(SK); }
+async function tryRestore(){
+  if(!localStorage.getItem(LS.salt)) return false;
+  const sk = sessionStorage.getItem(SK);
+  if(!sk) return false;
+  try{
+    cryptoKey = await crypto.subtle.importKey("raw", unb64(sk), {name:"AES-GCM"}, true, ["encrypt","decrypt"]);
+    if(await decStr(localStorage.getItem(LS.check)) !== "VALID") throw 0;
+    data = normalize(JSON.parse(await decStr(localStorage.getItem(LS.data))));
+    return true;
+  }catch(e){ cryptoKey = null; clearSessionKey(); return false; }
+}
 function normalize(d){
   d.settings = d.settings || {};
   if(!d.settings.periodLength) d.settings.periodLength = 5;
@@ -405,9 +423,10 @@ function enterApp(){
   pl.value = data.settings.periodLength; dc.value = data.settings.defaultCycle;
   dateInput.value = fmt(new Date());
   render();
+  cacheSessionKey();
 }
 function relock(){
-  cryptoKey = null;
+  cryptoKey = null; clearSessionKey();
   app.classList.add("hidden"); lock.classList.remove("hidden");
   isSetup = !localStorage.getItem(LS.salt); refreshLockUI(); pw1.focus();
 }
@@ -427,6 +446,7 @@ async function changePassword(newPw){
   localStorage.setItem(LS.salt, b64(salt));
   localStorage.setItem(LS.check, await encStr("VALID"));
   localStorage.setItem(LS.data, await encStr(JSON.stringify(data)));
+  await cacheSessionKey();
 }
 document.getElementById("changePw").addEventListener("click", openPwModal);
 document.getElementById("pwCancel").addEventListener("click", closePwModal);
@@ -674,7 +694,10 @@ document.getElementById("clear").onclick=()=>{
   }
 };
 
-pw1.focus();
+(async ()=>{
+  if(await tryRestore()){ enterApp(); }
+  else { pw1.focus(); }
+})();
 </script>
 </body>
 </html>
