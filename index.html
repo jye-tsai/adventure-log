@@ -523,13 +523,19 @@ function ghCfg(){
     repo:  (localStorage.getItem(GH.repo)||"").trim(),
     path:  (localStorage.getItem(GH.path)||"data.json").trim(),
     token: (localStorage.getItem(GH.token)||"").trim(),
+    branch:"main",
     auto:  localStorage.getItem(GH.auto)==="1"
   };
 }
 function ghSetStatus(msg, err){ ghStatus.textContent = msg; ghStatus.style.color = err ? "#e0394e" : "var(--muted)"; }
 function openGhModal(){
   const c = ghCfg();
-  ghOwner.value=c.owner; ghRepo.value=c.repo; ghPath.value=c.path; ghToken.value=c.token; ghAuto.checked=c.auto;
+  let owner=c.owner, repo=c.repo;
+  if((!owner||!repo) && location.hostname.endsWith(".github.io")){   // 在 Pages 上自動帶入
+    owner = owner || location.hostname.split(".")[0];
+    repo = repo || (location.pathname.split("/")[1]||"");
+  }
+  ghOwner.value=owner; ghRepo.value=repo; ghPath.value=c.path; ghToken.value=c.token; ghAuto.checked=c.auto;
   ghSetStatus(""); ghModal.classList.remove("hidden");
 }
 function closeGhModal(){ ghModal.classList.add("hidden"); }
@@ -541,44 +547,62 @@ function ghSaveCfg(){
   localStorage.setItem(GH.auto, ghAuto.checked ? "1" : "0");
 }
 function ghUrl(c){ return `https://api.github.com/repos/${c.owner}/${c.repo}/contents/${encodeURIComponent(c.path).replace(/%2F/g,"/")}`; }
-function ghHeaders(c){ return { "Authorization":"Bearer "+c.token, "Accept":"application/vnd.github+json" }; }
+function ghHeaders(c){ return { "Authorization":"Bearer "+c.token, "Accept":"application/vnd.github+json", "X-GitHub-Api-Version":"2022-11-28" }; }
 function currentBundleStr(){
   const bundle = { v:1, updated:localStorage.getItem("al_updated")||"", salt:localStorage.getItem(LS.salt), check:localStorage.getItem(LS.check), data:localStorage.getItem(LS.data) };
   return JSON.stringify(bundle, null, 2);
 }
-async function ghGetFile(c){
-  const r = await fetch(ghUrl(c), { headers: ghHeaders(c) });
-  if(r.status===404) return null;
-  if(!r.ok) throw new Error("讀取失敗（" + r.status + "）");
+function ghErr(status, j){
+  const detail = j && j.message ? "（"+j.message+"）" : "";
+  const map = {
+    401:"Token 無效或已過期，請重新產生並更新",
+    403:"權限不足：Token 需要此 repo 的 Contents 讀寫權限（或觸發速率限制）",
+    404:"找不到 repo／路徑，請檢查帳號、Repo、路徑與 Token 權限",
+    409:"版本衝突：repo 上的檔案較新",
+    422:"內容或路徑設定有誤"
+  };
+  return new Error((map[status] || ("GitHub 錯誤 "+status)) + detail);
+}
+// 用 API 讀最新（cache-busted、不受 Pages/CDN 延遲）；raw accept 直接回 bundle 物件
+async function ghReadBundle(c){
+  const r = await fetch(`${ghUrl(c)}?ref=${c.branch}&_=${Date.now()}`,
+    { headers:{...ghHeaders(c), "Accept":"application/vnd.github.raw+json"}, cache:"no-store" });
+  if(!r.ok) throw ghErr(r.status, await r.json().catch(()=>({})));
   return r.json();
+}
+// GET 取最新 sha → PUT 寫入；sha 衝突自動重試一次
+async function ghWrite(c){
+  const commit = async ()=>{
+    let sha;
+    const g = await fetch(`${ghUrl(c)}?ref=${c.branch}&_=${Date.now()}`, { headers: ghHeaders(c), cache:"no-store" });
+    if(g.ok) sha = (await g.json()).sha;
+    else if(g.status !== 404) throw ghErr(g.status, await g.json().catch(()=>({})));
+    const body = { message:"update "+new Date().toISOString(), content: btoa(unescape(encodeURIComponent(currentBundleStr()))), branch:c.branch };
+    if(sha) body.sha = sha;
+    return fetch(ghUrl(c), { method:"PUT", headers:{...ghHeaders(c),"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  };
+  let r = await commit();
+  if(r.status===409 || r.status===422) r = await commit();
+  if(!r.ok) throw ghErr(r.status, await r.json().catch(()=>({})));
 }
 async function ghUpload(silent){
   const c = ghCfg();
   if(!c.owner || !c.repo || !c.token){ if(!silent) ghSetStatus("請先填帳號、Repo 與 Token", true); return; }
   if(!silent) ghSetStatus("上傳中…");
-  try{
-    const existing = await ghGetFile(c);
-    const body = { message:"update "+new Date().toISOString(), content: btoa(currentBundleStr()) };
-    if(existing && existing.sha) body.sha = existing.sha;
-    const r = await fetch(ghUrl(c), { method:"PUT", headers:{...ghHeaders(c),"Content-Type":"application/json"}, body: JSON.stringify(body) });
-    if(!r.ok) throw new Error("上傳失敗（" + r.status + "）");
-    if(!silent) ghSetStatus("✅ 已上傳到 GitHub");
-  }catch(e){ if(!silent) ghSetStatus(e.message, true); }
+  try{ await ghWrite(c); if(!silent) ghSetStatus("✅ 已上傳（"+new Date().toLocaleTimeString()+"）"); }
+  catch(e){ if(!silent) ghSetStatus(e.message, true); }
 }
 async function ghDownload(){
   const c = ghCfg();
   if(!c.owner || !c.repo || !c.token){ ghSetStatus("請先填帳號、Repo 與 Token", true); return; }
   ghSetStatus("下載中…");
   try{
-    const f = await ghGetFile(c);
-    if(!f){ ghSetStatus("repo 上找不到該檔案", true); return; }
-    const txt = atob((f.content||"").replace(/\s/g,""));
-    const bundle = JSON.parse(txt);
-    if(!bundle.salt || !bundle.check || !bundle.data) throw new Error("檔案格式不符");
-    localStorage.setItem(LS.salt, bundle.salt);
-    localStorage.setItem(LS.check, bundle.check);
-    localStorage.setItem(LS.data, bundle.data);
-    localStorage.setItem("al_updated", bundle.updated || new Date().toISOString());
+    const b = await ghReadBundle(c);
+    if(!b || !b.salt || !b.check || !b.data) throw new Error("檔案格式不符");
+    localStorage.setItem(LS.salt, b.salt);
+    localStorage.setItem(LS.check, b.check);
+    localStorage.setItem(LS.data, b.data);
+    localStorage.setItem("al_updated", b.updated || new Date().toISOString());
     ghSetStatus("✅ 已下載，請用密語解鎖");
     closeGhModal(); relock();
   }catch(e){ ghSetStatus(e.message, true); }
@@ -871,21 +895,22 @@ document.getElementById("clear").onclick=()=>{
 
 // 開啟時先讀同目錄 data.json（加密包）；比本機新或本機無資料時才採用，避免蓋掉未上傳的編輯
 async function loadRemoteData(){
+  const c = ghCfg();
+  let b = null;
   try{
-    const r = await fetch("./data.json", { cache:"no-store" });
-    if(!r.ok) return;
-    const b = await r.json();
-    if(!b || !b.salt || !b.check || !b.data) return;
-    const localU = localStorage.getItem("al_updated") || "";
-    const remoteU = b.updated || "";
-    if(localStorage.getItem(LS.data) && remoteU <= localU) return;   // 本機較新 → 保留
-    const oldSalt = localStorage.getItem(LS.salt);
-    localStorage.setItem(LS.salt, b.salt);
-    localStorage.setItem(LS.check, b.check);
-    localStorage.setItem(LS.data, b.data);
-    localStorage.setItem("al_updated", remoteU || new Date().toISOString());
-    if(b.salt !== oldSalt) clearSessionKey();   // 對方改過密語 → 需重新解鎖
-  }catch(e){}
+    if(c.owner && c.repo && c.token){ b = await ghReadBundle(c); }                 // 有設定 → API 讀最新(不吃 CDN 快取)
+    else { const r = await fetch(`./data.json?_=${Date.now()}`, { cache:"no-store" }); if(r.ok) b = await r.json(); }
+  }catch(e){ b = null; }
+  if(!b || !b.salt || !b.check || !b.data) return;
+  const localU = localStorage.getItem("al_updated") || "";
+  const remoteU = b.updated || "";
+  if(localStorage.getItem(LS.data) && remoteU <= localU) return;   // 本機較新 → 保留
+  const oldSalt = localStorage.getItem(LS.salt);
+  localStorage.setItem(LS.salt, b.salt);
+  localStorage.setItem(LS.check, b.check);
+  localStorage.setItem(LS.data, b.data);
+  localStorage.setItem("al_updated", remoteU || new Date().toISOString());
+  if(b.salt !== oldSalt) clearSessionKey();   // 對方改過密語 → 需重新解鎖
 }
 
 (async ()=>{
