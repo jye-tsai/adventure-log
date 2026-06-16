@@ -246,7 +246,7 @@
     <label>帳號 (owner)</label>
     <input type="text" id="ghOwner" placeholder="jye-tsai" autocomplete="off">
     <label>Repo 名稱</label>
-    <input type="text" id="ghRepo" placeholder="adventure-log" autocomplete="off">
+    <input type="text" id="ghRepo" placeholder="omikuji" autocomplete="off">
     <label>檔名 / 路徑</label>
     <input type="text" id="ghPath" placeholder="data.json" autocomplete="off">
     <label>Personal Access Token</label>
@@ -842,7 +842,7 @@ function clamp(v,a,b){ if(isNaN(v))return a; return Math.min(b,Math.max(a,v)); }
 document.getElementById("export").onclick=()=>{
   const bundle = { v:1, salt:localStorage.getItem(LS.salt), check:localStorage.getItem(LS.check), data:localStorage.getItem(LS.data) };
   const blob = new Blob([JSON.stringify(bundle,null,2)],{type:"application/json"});
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "adventure-save.json"; a.click();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "omikuji.json"; a.click();
 };
 document.getElementById("import").onclick=()=>document.getElementById("fileInput").click();
 document.getElementById("fileInput").onchange=(e)=>{
